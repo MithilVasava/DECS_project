@@ -1,43 +1,33 @@
 #include "thread_pool.hpp"
 #include <iostream>
-using namespace std;
 
-void check_connc(PGconn* c){
-    if(!c || PQstatus(c)!= CONNECTION_OK){
-        throw runtime_error(string("PG connect failed: ")+ (c?PQerrorMessage(c):"null"));
+DbPool::DbPool(const std::string& conninfo, int size) {
+  for (int i = 0; i < size; i++) {
+    PGconn* c = PQconnectdb(conninfo.c_str());
+    if (!c || PQstatus(c) != CONNECTION_OK) {
+      throw std::runtime_error("PG connect failed: " + std::string(PQerrorMessage(c)));
     }
+    PGresult* r = PQexec(c, "SET synchronous_commit = OFF"); // Basically we set sync off for the speed
+    PQclear(r);
+    idle_.push(c);
+  }
+  std::cerr << "[DB] Connection pool initialized (" << size << " connections)\n";
 }
 
-Thread_pool::Thread_pool(const string &connection_info, int size){
-    for(int i=0;i<size;i++){
-        PGconn *con = PQconnectdb(connection_info.c_str());
-        check_connc(con);
-        
-        PGresult *r = PQexec(con, "SET synchronous_commit TO OFF");
-        PQclear(r);
-        idle_.push(con);
-        total_++;
-    }
+DbPool::~DbPool() {
+  while (!idle_.empty()) { PQfinish(idle_.front()); idle_.pop(); }
 }
 
-Thread_pool::~Thread_pool(){
-    while(!idle_.empty()){
-        PQfinish(idle_.front());
-        idle_.pop();
-    }
+PGconn* DbPool::acquire() { //acquire the connection if the we have an extra connection
+  std::unique_lock<std::mutex> lk(mu_);
+  cv_.wait(lk, [&]{ return !idle_.empty(); });
+  PGconn* c = idle_.front();
+  idle_.pop();
+  return c;
 }
 
-PGconn* Thread_pool::acquire(){
-    unique_lock<mutex> lk(mu);
-    cd.wait(lk, [&]{return !idle_.empty();});
-    auto c = idle_.front();
-    idle_.pop();
-    return c;
+void DbPool::release(PGconn* c) { //release the connection and wake up waiting request if one
+  std::lock_guard<std::mutex> g(mu_);
+  idle_.push(c);
+  cv_.notify_one();
 }
-
-void Thread_pool::release_conn(PGconn* conn){
-    lock_guard<mutex> g(mu);
-    idle_.push(conn);
-    cd.notify_one();
-}
-

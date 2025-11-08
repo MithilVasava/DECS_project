@@ -5,53 +5,46 @@
 #include <mutex>
 #include <optional>
 
+class LRUCache {
+public:
+  explicit LRUCache(size_t capacity) : cap_(capacity) {} //initialize cache acc to size
 
-class LRU{
-    private:
-        size_t cap;
-        std::list<std::pair<std::string, std::string>> items;
-        std::unordered_map<std::string, decltype(items.begin())> map;
-        std::mutex mu;
+  std::optional<std::string> get(const std::string& key) {
+    std::lock_guard<std::mutex> g(mu_);
+    auto it = map_.find(key);
+    if (it == map_.end()) return std::nullopt;
+    items_.splice(items_.begin(), items_, it->second);
+    return it->second->second;
+  }
 
-    public:
-        explicit LRU(size_t capacity): cap(capacity) {}
+  void put(const std::string& key, const std::string& value) {
+    std::lock_guard<std::mutex> g(mu_);
+    auto it = map_.find(key);
+    if (it != map_.end()) {
+      it->second->second = value;
+      items_.splice(items_.begin(), items_, it->second);
+      return;
+    }
+    items_.emplace_front(key, value);
+    map_[key] = items_.begin();
+    if (map_.size() > cap_) {
+      const auto& old = items_.back().first;
+      map_.erase(old);
+      items_.pop_back();
+    }
+  }
 
-        std::optional<std::string> get(const std::string &key){
-            std::lock_guard<std::mutex> g(mu);
-            auto it = map.find(key);
-            if(it==map.end()){
-                return std::nullopt;
-            }
-            items.splice(items.begin(), items, it->second);
-            return it->second->second;
-        }
+  void erase(const std::string& key) {
+    std::lock_guard<std::mutex> g(mu_);
+    auto it = map_.find(key);
+    if (it == map_.end()) return;
+    items_.erase(it->second);
+    map_.erase(it);
+  }
 
-        void put(const std::string &key, const std::string &value){
-            std::lock_guard<std::mutex> g(mu);
-            auto it = map.find(key);
-            if(it!=map.end()){
-                it->second->second = value;
-                items.splice(items.begin(), items, it->second);
-                return;
-            }
-            items.emplace_front(key, value);
-            map[key] = items.begin();
-            if(map.size() > cap){
-                auto &back = items.back().first;
-                map.erase(back);
-                items.pop_back();
-            }
-        }
-
-        void erase(const std::string &key){
-            std::lock_guard<std::mutex> g(mu);
-            auto it = map.find(key);
-            if(it==map.end()){
-                return;
-            }
-            items.erase(it->second);
-            map.erase(it);
-        }
-
-
+private:
+  size_t cap_;
+  std::list<std::pair<std::string,std::string>> items_;
+  std::unordered_map<std::string,decltype(items_.begin())> map_;
+  std::mutex mu_;
 };

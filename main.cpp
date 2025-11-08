@@ -1,71 +1,34 @@
 #include <iostream>
 #include "httplib.h"
-#include "kv_store.hpp"
 #include "thread_pool.hpp"
-using namespace std;
+#include "kv_store.hpp"
 
 int main(int argc, char* argv[]) {
-    if (argc < 4) {
-        std::cerr << "Usage: " << argv[0] 
-                  << " <connection_string> <db_pool_size> <thread_pool_size>\n";
-        return 1;
-    }
+  if (argc < 4) {
+    std::cerr << "Usage: ./tenant_kv \"host=127.0.0.1 port=5432 dbname=kvdb user=postgres\" <db_pool> <threads>\n";
+    return 1;
+  }
 
-    std::string conninfo = argv[1];
-    int db_pool_size = std::stoi(argv[2]);
-    int http_threads = std::stoi(argv[3]);
+  DbPool pool(argv[1], std::stoi(argv[2])); // 1.connection 2.size of db connections
+  KVStore kv(pool, 10000); //poolsizes
 
-    Thread_pool pool(conninfo, db_pool_size);
-    {
-        PGconn* c = pool.acquire();
-        PGresult* r = PQexec(c,
-            "CREATE TABLE IF NOT EXISTS kv ("
-            " key TEXT PRIMARY KEY,"
-            " value TEXT );"
-        );
-        if (PQresultStatus(r) != PGRES_COMMAND_OK) {
-            std::cerr << "[DB ERROR] Failed to create kv table: "
-                      << PQerrorMessage(c) << std::endl;
-            PQclear(r);
-            return 1;
-        }
-        PQclear(r);
-        pool.release_conn(c);
-        std::cout << "[DB] kv table verified/created.\n";
-    }
-    kv_store kv(pool, 100000); 
+  httplib::Server server;
+  server.new_task_queue = [t = std::stoi(argv[3])] { return new httplib::ThreadPool(t); }; //create thread_pool
 
-    httplib::Server svr;
+  server.Put(R"(/kv/(.*))", [&](const auto& req, auto& res){
+    kv.put(req.matches[1], req.body); res.status = 200;
+  });
 
-  
-    svr.new_task_queue = [http_threads] {
-        return new httplib::ThreadPool(http_threads);
-    };
+  server.Get(R"(/kv/(.*))", [&](const auto& req, auto& res){
+    auto v = kv.get(req.matches[1]);
+    if (v) res.set_content(*v, "text/plain");
+    else res.status = 404;
+  });
 
+  server.Delete(R"(/kv/(.*))", [&](const auto& req, auto& res){
+    kv.erase(req.matches[1]); res.status = 200;
+  });
 
-    svr.Put(R"(/kv/(.*))", [&](const httplib::Request& req, httplib::Response& res) {
-        std::string key = req.matches[1];
-        if (kv.put(key, req.body)) res.status = 200;
-        else { res.status = 500; res.set_content("DB error", "text/plain"); }
-    });
-
-   
-    svr.Get(R"(/kv/(.*))", [&](const httplib::Request& req, httplib::Response& res) {
-        std::string key = req.matches[1];
-        auto v = kv.get(key);
-        if (v) res.set_content(*v, "text/plain");
-        else res.status = 404;
-    });
-
-    svr.Delete(R"(/kv/(.*))", [&](const httplib::Request& req, httplib::Response& res) {
-        std::string key = req.matches[1];
-        if (kv.erase(key)) res.status = 200;
-        else res.status = 404;
-    });
-
-    std::cout << "[Server] Running with " << http_threads 
-              << " HTTP worker threads\n";
-
-    svr.listen("0.0.0.0", 8080);
-    return 0;
+  std::cout << "[Server] Running on :8080\n";
+  server.listen("0.0.0.0", 8080);
 }
